@@ -1,0 +1,44 @@
+#!/bin/sh /etc/rc.common
+
+START=61
+STOP=10
+
+help()
+{
+	cat <<EOF
+Syntax: /etc/init.d/bfd [command]
+
+Available commands:
+        start   Start the service
+        stop    Stop the service
+	restart	Restart the service
+EOF
+}
+
+start() {
+	local model
+    model="$(ubus call system board|grep model|cut -d "\"" -f 4)"
+    if [ "$model" != "GR600" -a "$model" != "GR600C" ];then
+        exit 0
+    fi
+	count=`ps | grep "bfdd" | grep -v "grep" | wc -l `
+	if [ 0 == $count ]                                
+	then                                              
+		/etc/init.d/frr start > /dev/null 2>&1            
+	fi 
+#	/usr/sbin/gpnbfd start > /dev/null 2>&1
+	/usr/sbin/bfdlisten &
+}
+
+restart() {
+       stop
+       start
+}
+
+stop() {
+#        /usr/sbin/gpnbfd stop
+        local pid
+        for pid in $(pgrep -f "bfdlisten"); do
+                kill -KILL "$pid" > /dev/null 2>&1
+        done
+}

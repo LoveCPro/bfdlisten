@@ -1,0 +1,66 @@
+#!/bin/sh
+. /lib/functions.sh
+
+# openwrt logger -p :                                                                 
+# 0:emerg  1:alert  2:crit  3:err  4:warn  5:notice  6:info  7:debug
+DEBUG="logger -t bfd -p debug "
+ERROR="logger -t bfd -p err "
+
+send_notification(){
+	EVENT="bfd"
+	cmdstr="ubus send $EVENT '{\"instance\":\"$SECTION\", \"ifname\":\"$ifname\",\"srcip\":\"$srcip\",\"dstip\":\"$dstip\",\"vrf\":\"$vrf\",\"state\":\"$state\",\"diag\":\"$diag\"}'"		
+	eval $cmdstr
+}
+
+send_bfd_alarm(){
+	almcode=111
+	almseq=20
+	almsev="critical"
+	orig_time=$(date +%s)
+    base_time=$(date -d "2000-01-01 00:00:00" +%s)
+    let almtime=$orig_time-$base_time
+    esn=$(cat /sys/class/net/eth0/address |sed 's/\://g')
+    EVENT="alarmd"
+	resid={$srcip-$ifname}-{$dstip-$ifname}
+	echo "$orig_time $base_time $almtime" > /tmp/wg_alarm.log
+
+	[ "$state" = "down" ] && {
+		almstat="occurred"
+        ubus send $EVENT '{ "code": '$almcode', "res_id": "'$resid'", "severity": "'$almsev'", "time": '$almtime', "status": "'$almstat'", "descri": "wg tunnel is down", "sequence": '$almseq', "esn": "'$esn'" }'
+    }
+
+	[ "$state" = "up" ] && {
+		almstat="cleared"
+        ubus send $EVENT '{ "code": '$almcode', "res_id": "'$resid'", "severity": "'$almsev'", "time": '$almtime', "status": "'$almstat'", "descri": "wg tunnel is up", "sequence": '$almseq', "esn": "'$esn'" }'
+    }  
+}
+
+get_device(){
+	config_load bfd
+	config_get ifname $SECTION interface
+	config_get srcip $SECTION srcip
+	config_get dstip $SECTION dstip
+    local proto=$(uci -q get network.$ifname.proto)
+    [ "wireguard" = "$proto" ] || exit 0
+
+	[ -z $ifname ] && [ -z $dstip ] && {                                                                      
+		$DEBUG  "10-bfd: The entered sectionname does not exist"
+                exit                                                                                                                       
+        }
+
+	config_get vrf $SECTION vrf
+	config_get state $SECTION state
+	config_get diag $SECTION diag
+}
+
+[ -n "$BFDSECTION" ] || {
+	        $ERROR "10-bfd: input env BFDSECTION is null string"
+        exit 2              
+}
+
+SECTION=$BFDSECTION
+get_device 
+send_notification
+send_bfd_alarm
+
+exit 0

@@ -1,0 +1,256 @@
+#!/bin/ash
+
+[ -e /lib/functions.sh ] && . /lib/functions.sh || . ./functions.sh
+
+parse2_config(){
+	local 	CMD
+
+	[ -z "$ifname" ] && {
+		$ERR "gpnbfd：interface is null"
+		return 
+	}
+
+	CMD="ovs-vsctl set interface $ifname"
+		
+	if [ "1" == "$enabled" ]; then
+		append CMD "bfd:enable=true"
+	elif [ "0" == "$enabled" ]; then
+		append CMD "bfd:enable=false"
+	else
+		$ERR "gpnbfd: enabled err"
+		return 
+	fi
+
+	[ ! -z "$srcip" ] && {
+		append CMD "bfd:bfd_src_ip=$srcip"
+	}
+	
+	[ ! -z "$dstip" ] && {
+		append CMD "bfd:bfd_dst_ip=$dstip"
+	}
+	[ ! -z "$srcmac" ] && {
+		append CMD "bfd:bfd_local_src_mac=$srcmac"
+	}
+	
+	[ ! -z "$dstmac" ] && {
+		append CMD "bfd:bfd_local_dst_mac=$dstmac"
+	}
+
+	[ ! -z "$tx" ] && {
+		append CMD "bfd:min_tx=$tx"
+	}
+	
+	[ ! -z "$rx" ] && {
+		append CMD "bfd:min_rx=$rx"
+	}
+
+	[ ! -z "$mult" ] && {
+		append CMD "bfd:mult=$mult"
+	}
+	eval $CMD
+}
+
+parse3_config(){
+	local 	CMD
+
+	[ -z "$enabled" ] || [ "0" -eq "$enabled" ] || [ -z "$dstip" ] && {
+		return 
+	}
+	
+	CMD="vtysh -c enable  -c config  -c bfd -c \"peer $dstip"
+
+	[ ! -z "$srcip" ] && {
+		append CMD "local-address $srcip"
+	}
+
+	[ ! -z "$vrf" ] && {
+		append CMD "vrf $vrf"
+	}
+
+	[ ! -z "$ifname" ] && {
+		append CMD "interface $ifname"
+	}
+	append CMD  "\""
+	
+	[ ! -z "$tx" ] && {
+		append CMD "-c \"transmit-interval $tx\""
+	}
+
+	[ ! -z "$rx" ] && {
+		append CMD "-c \"receive-interval $rx\""
+	}
+
+	[ ! -z "$mult" ] && {
+		append CMD "-c \"detect-multiplier $mult\""
+	}
+	
+	append CMD "-c end -c write > /dev/null 2>&1"
+	eval $CMD
+}
+
+stop_bfd_frr(){
+	local 	CMD
+
+	[ -z "$enabled" ] || [ "0" -eq "$enabled" ] || [ -z "$dstip" ] && {
+		return 
+	}
+	
+	CMD="vtysh -c enable  -c config  -c bfd -c \"no peer $dstip"
+
+	[ ! -z "$srcip" ] && {
+		append CMD "local-address $srcip"
+	}
+
+	[ ! -z "$vrf" ] && {
+		append CMD "vrf $vrf"
+	}
+
+	[ ! -z "$ifname" ] && {
+		append CMD "interface $ifname"
+	}
+	append CMD  "\""
+
+	append CMD "-c end -c write > /dev/null 2>&1"
+	eval $CMD
+}
+
+start_parse(){
+	sessionname=$1
+	config_get_bool enabled $sessionname enabled
+	config_get srcip $sessionname srcip
+	config_get dstip $sessionname dstip
+	config_get ifname $sessionname interface
+	config_get vrf $sessionname vrf
+	config_get srcmac $sessionname srcmac
+	config_get dstmac $sessionname dstmac
+	config_get rx $sessionname minrx
+	config_get tx $sessionname interval
+	config_get mult $sessionname mult
+	
+	config_get type $sessionname type
+	
+	if [ "$type" == "3" ]; then
+		parse3_config  
+	elif [ "$type" == "2" ]; then
+		parse2_config 
+	else
+		$ERR  "gpnbfd : config file error"
+	fi
+}
+
+stop_state(){
+	sessionname=$1
+	local state
+	local diag
+	config_get type $sessionname type
+
+	if [ "$type" == "2" ]; then
+
+		config_get state $sessionname state
+		config_get diag $sessionname diag
+	        if [ "$state" != "down" ];then
+        	    uci -P /var/state revert bfd.$sessionname.state
+            	    uci -P /var/state set bfd.$sessionname.state="down"
+	    	    uci -P /var/state revert bfd.$sessionname.diag
+            	    uci -P /var/state set bfd.$sessionname.diag="Path Down"
+		    uci -P /var/state revert bfd.$sessionname.time
+                    time=`date +%Y/%m/%d" "%H:%M:%S`
+                    uci -P /var/state set bfd.$sessionname.time="$time"
+	    	    env -i BFDSECTION=$sessionname /sbin/hotplug-call bfd
+        	fi
+
+	fi
+#	uci -P /var/state revert bfd.$sessionname.state
+#	uci -P /var/state revert bfd.$sessionname.diag
+#	uci -P /var/state revert bfd.$sessionname.time
+}
+
+stop_bfd2(){
+	local interface=`ovs-vsctl list interface | grep "name " | awk '{print $3}'`
+	local iftype
+	for result in $interface 
+	do
+
+		iftype=`ovs-vsctl list interface $result | grep "type " | awk '{print $3}'`
+		
+		if [ $iftype == "internal" ]; then
+			continue;
+		fi
+		eval "ovs-vsctl remove interface $result bfd enable bfd_src_ip bfd_dst_ip min_rx min_tx mult bfd_local_dst_mac bfd_local_dst_mac"
+	done
+}
+
+stop_bfd3(){
+<<COMMENT
+	local CMD
+	local num=0
+	local result
+	local peertype=`vtysh -c "show bfd peers" | egrep "Peer Type:"| awk '{print $3}'`
+
+	for result in $peertype
+	do
+		num=`expr $num + 1`
+		if [ $result == "configured" ]; then
+			cmd="vtysh -c \"show bfd peers\" | grep \"peer \" | sed -n '$num p'"
+			config_info=`eval $cmd`
+			CMD="vtysh -c config -c bfd -c \"no $config_info\" -c end -c write > /dev/null 2>&1"
+			eval $CMD
+		fi
+	done 
+COMMENT
+}
+
+stop_bfd(){
+	local 	CMD
+	sessionname=$1
+	config_get_bool enabled $sessionname enabled
+	config_get srcip $sessionname srcip
+	config_get dstip $sessionname dstip
+	config_get ifname $sessionname interface
+	config_get vrf $sessionname vrf
+	[ -z "$enabled" ] || [ "0" -eq "$enabled" ] || [ -z "$dstip" ] && {
+		return 
+	}
+	
+	CMD="vtysh -c enable  -c config  -c bfd -c \"no peer $dstip"
+
+	[ ! -z "$srcip" ] && {
+		append CMD "local-address $srcip"
+	}
+
+	[ ! -z "$vrf" ] && {
+		append CMD "vrf $vrf"
+	}
+
+	[ ! -z "$ifname" ] && {
+		append CMD "interface $ifname"
+	}
+	append CMD  "\""
+
+	append CMD "-c end -c write > /dev/null 2>&1"
+	eval $CMD
+
+	stop_state  $sessionname
+}
+
+stop_bfd_config(){
+#	stop_bfd3
+#	stop_bfd2
+	config_foreach stop_bfd  session 
+}
+
+config_load  bfd 
+case "$1" in
+	start|"")
+		config_foreach start_parse  session   
+	;;
+	stop)
+		stop_bfd_config
+	;;
+	add)
+		start_parse "$2"
+	;;
+	del)
+		stop_bfd "$2"
+	;;
+esac
